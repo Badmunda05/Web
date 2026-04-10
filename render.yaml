@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bad-music-webapp
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BOT_TOKEN
+        sync: false          # set manually in Render dashboard
+      - key: WEBAPP_URL
+        sync: false          # set to your Render URL after first deploy
+    autoDeploy: true
