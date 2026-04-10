@@ -1,66 +1,62 @@
 import os
 import logging
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Enable logging
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://your-domain.com")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBAPP_URL = os.getenv("WEBAPP_URL")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Open Music App", web_app=WebAppInfo(url=WEBAPP_URL))]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        "Welcome to the Music Bot! Click the button below to join the music room.",
+        "Welcome to the Music Bot! Click below to open the app.",
         reply_markup=reply_markup
     )
 
 async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Please provide a song link. Example: /play https://youtube.com/watch?v=...")
+        await update.message.reply_text(
+            "Example:\n/play https://youtube.com/watch?v=..."
+        )
         return
 
     link = context.args[0]
-    # In a real scenario, we'd notify the backend to start downloading
-    # For now, we'll just provide the WebApp link
 
     keyboard = [
         [InlineKeyboardButton("Join & Listen", web_app=WebAppInfo(url=f"{WEBAPP_URL}?play={link}"))]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        f"Song requested! Join the room to listen.",
+        "Song requested! Click below:",
         reply_markup=reply_markup
     )
 
-async def run_bot():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("BOT_TOKEN not set, bot will not start.")
+def main():
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN missing")
         return
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    start_handler = CommandHandler('start', start)
-    play_handler = CommandHandler('play', play)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("play", play))
 
-    application.add_handler(start_handler)
-    application.add_handler(play_handler)
+    print("✅ Bot running...")
+    app.run_polling()
 
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    print("Bot started...")
-
-if __name__ == '__main__':
-    asyncio.run(run_bot())
+if __name__ == "__main__":
+    main()
