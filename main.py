@@ -9,7 +9,7 @@ from typing import List, Dict, Optional
 import os
 import time
 from downloader import download_song, get_stream_url, search_songs, get_video_info, get_audio_url, get_video_url
-from bot import run_bot
+from app import run_bot
 
 # ── In-memory stores ──────────────────────────────────────────
 chat_messages: List[dict] = []
