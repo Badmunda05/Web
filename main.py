@@ -8,14 +8,13 @@ import asyncio
 from typing import List, Dict, Optional
 import os
 import time
-from downloader import download_song, get_stream_url
+from downloader import download_song, get_stream_url, search_songs, get_video_info, get_audio_url, get_video_url
 from bot import run_bot
 
 # ── In-memory stores ──────────────────────────────────────────
-# For production use MongoDB/Redis, but this works perfectly
-chat_messages: List[dict] = []          # Global chat history (last 200)
-play_history:  Dict[str, List] = {}     # uid -> list of played songs
-listeners_meta: Dict[str, dict] = {}    # socket_id -> {uid, name, photo, username}
+chat_messages: List[dict] = []
+play_history:  Dict[str, List] = {}
+listeners_meta: Dict[str, dict] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,11 +49,11 @@ room = MusicRoom()
 # ── Helpers ───────────────────────────────────────────────────
 def room_state():
     return {
-        "type":           "state_update",
-        "current_song":   room.current_song,
-        "is_playing":     room.is_playing,
-        "seek_time":      room.get_current_seek(),
-        "listeners":      list(listeners_meta.values()),
+        "type":            "state_update",
+        "current_song":    room.current_song,
+        "is_playing":      room.is_playing,
+        "seek_time":       room.get_current_seek(),
+        "listeners":       list(listeners_meta.values()),
         "listeners_count": len(room.listeners),
     }
 
@@ -80,41 +79,94 @@ async def broadcast_chat(msg: dict):
     for ws in dead:
         room.listeners.remove(ws)
 
-# ── REST Endpoints ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# REST Endpoints
+# ══════════════════════════════════════════════════════════════
 
 @app.get("/status")
 async def get_status():
     return room_state()
 
+# ── Search ────────────────────────────────────────────────────
+
+@app.get("/api/search")
+async def api_search(q: str = "", limit: int = 5):
+    """Search songs via Bad API /search?q=...&limit=5"""
+    if not q.strip():
+        return JSONResponse(status_code=400, content={"error": "Query required", "results": []})
+    results = await search_songs(q.strip(), limit)
+    return {"results": results, "query": q}
+
+# ── Video Endpoints ───────────────────────────────────────────
+
+@app.get("/api/video/info/{vid}")
+async def api_video_info(vid: str):
+    """GET /video/info/:id — video metadata"""
+    data = await get_video_info(vid)
+    if data is None:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return data
+
+@app.get("/api/video/audio/{vid}")
+async def api_video_audio(vid: str):
+    """GET /video/audio/:id — audio stream URL"""
+    url = await get_audio_url(vid)
+    if not url:
+        return JSONResponse(status_code=404, content={"error": "Audio not available"})
+    return {"url": url, "id": vid}
+
+@app.get("/api/video/url/{vid}")
+async def api_video_url(vid: str, quality: str = "720p"):
+    """GET /video/url/:id?quality=720p — video stream URL"""
+    url = await get_video_url(vid, quality)
+    if not url:
+        return JSONResponse(status_code=404, content={"error": "Video URL not available"})
+    return {"url": url, "id": vid, "quality": quality}
+
+# ── Play Song (download + broadcast) ─────────────────────────
+
 @app.post("/play_song")
 async def play_song(link: str):
+    """
+    Download song via Bad API and broadcast to all listeners.
+    First tries download_song (saves to disk), falls back to stream URL.
+    """
+    # Try to get info for a nice title
+    info = await get_video_info(link)
+    title = (info or {}).get("title") or link.split("/")[-1] or "Song"
+
+    # Try download (cached), fallback to direct stream URL
     url = await download_song(link)
+    if not url:
+        url = await get_stream_url(link)
+
     if url:
         room.current_song = {
-            "title": link.split("/")[-1] if "/" in link else "Song",
-            "url":   url,
-            "link":  link,
+            "title":     title,
+            "thumbnail": (info or {}).get("thumbnail", ""),
+            "url":       url,
+            "link":      link,
         }
         room.is_playing       = True
         room.seek_time        = 0.0
         room.last_update_time = time.monotonic()
         await broadcast_state()
-        return {"status": "success", "url": url}
-    return JSONResponse(status_code=400, content={"status": "error", "detail": "Could not download song"})
+        return {"status": "success", "url": url, "title": title}
+
+    return JSONResponse(status_code=400, content={"status": "error", "detail": "Could not fetch audio"})
 
 # ── Profile / History ──────────────────────────────────────────
 
 @app.get("/api/profile/{uid}")
 async def get_profile(uid: str):
     history = play_history.get(uid, [])
-    # Find user meta from current listeners
     meta = next((v for v in listeners_meta.values() if v.get("uid") == uid), {})
     return {
-        "uid":      uid,
-        "name":     meta.get("name", "Guest"),
-        "username": meta.get("username", ""),
-        "photo":    meta.get("photo", ""),
-        "plays":    history,
+        "uid":        uid,
+        "name":       meta.get("name", "Guest"),
+        "username":   meta.get("username", ""),
+        "photo":      meta.get("photo", ""),
+        "plays":      history,
         "play_count": len(history),
     }
 
@@ -130,7 +182,7 @@ async def log_play(request: Request):
             history.pop()
     return {"status": "ok"}
 
-# ── Chat REST (history load) ────────────────────────────────────
+# ── Chat REST ─────────────────────────────────────────────────
 
 @app.get("/api/chat")
 async def get_chat():
@@ -161,7 +213,6 @@ async def websocket_endpoint(websocket: WebSocket, uid: str):
     room.listeners.append(websocket)
     sid = str(id(websocket))
 
-    # Send current state + chat history immediately
     await websocket.send_json({
         **room_state(),
         "chat_history": chat_messages[-40:],
@@ -174,7 +225,6 @@ async def websocket_endpoint(websocket: WebSocket, uid: str):
             msg_type = data.get("type")
 
             if msg_type == "join":
-                # User identifies themselves (Telegram profile)
                 listeners_meta[sid] = {
                     "uid":      uid,
                     "name":     data.get("name", "Guest"),
@@ -220,6 +270,25 @@ async def websocket_endpoint(websocket: WebSocket, uid: str):
                     if len(chat_messages) > 200:
                         chat_messages.pop(0)
                     await broadcast_chat(msg)
+
+            elif msg_type == "request_song":
+                # Client requests a song by ID/link via WebSocket
+                link = data.get("link", "")
+                if link:
+                    info = await get_video_info(link)
+                    title = (info or {}).get("title", "Song")
+                    url = await get_stream_url(link)
+                    if url:
+                        room.current_song = {
+                            "title":     title,
+                            "thumbnail": (info or {}).get("thumbnail", ""),
+                            "url":       url,
+                            "link":      link,
+                        }
+                        room.is_playing       = True
+                        room.seek_time        = 0.0
+                        room.last_update_time = time.monotonic()
+                        await broadcast_state()
 
     except WebSocketDisconnect:
         if websocket in room.listeners:
